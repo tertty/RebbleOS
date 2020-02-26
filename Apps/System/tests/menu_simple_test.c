@@ -13,7 +13,8 @@
 static SimpleMenuLayer *s_simple_menu_layer;
 static MenuLayer* s_menu_layer;
 static SimpleMenuSection s_menu_section;
-static SimpleMenuItem s_menu_items[7];
+static SimpleMenuItem s_menu_items[30];
+static char s_menu_item_buf[30][10];
 
 static MenuRowAlign s_row_align = MenuRowAlignCenter;
 static MenuLayerReloadBehaviour s_reload_beh = MenuLayerReloadBehaviourManual;
@@ -83,12 +84,12 @@ static void _menu_select_callback(ClickRecognizerRef recognizer, void *context)
 
 static void _menu_next_callback(ClickRecognizerRef recognizer, void *context)
 {
-    menu_layer_set_selected_next(s_menu_layer, false, s_row_align, true);
+    menu_layer_set_selected_next(s_menu_layer, recognizer, false, s_row_align, true);
 }
 
 static void _menu_prev_callback(ClickRecognizerRef recognizer, void *context)
 {
-    menu_layer_set_selected_next(s_menu_layer, true, s_row_align, true);
+    menu_layer_set_selected_next(s_menu_layer, recognizer, true, s_row_align, true);
 }
 
 static void _menu_exit_callback(ClickRecognizerRef recognizer, void* context)
@@ -133,6 +134,12 @@ bool menu_simple_test_init(Window *window)
     s_menu_items[num_a_items++] = (SimpleMenuItem){
         .title = "Pass test"
     };
+    for (; num_a_items < sizeof(s_menu_items) / sizeof(s_menu_items[0]); num_a_items++) {
+        snprintf(s_menu_item_buf[num_a_items], sizeof(s_menu_item_buf[0]), "Item %d", num_a_items);
+        s_menu_items[num_a_items] = (SimpleMenuItem) {
+            .title = s_menu_item_buf[num_a_items]
+        };
+    }
 
     s_menu_section = (SimpleMenuSection){
         .title = NULL,

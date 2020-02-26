@@ -1,49 +1,34 @@
-#pragma once
 /* notification_window.h
+ * Renders a scrollable detailed list of notifications.
+ * RebbleOS
  *
- * Displays notifications sent to the watch from the phone.
- *
- * Author: Carson Katri <me@carsonkatri.com>
+ * Author: Joshua Wise <joshua@joshuawise.com>
  */
 
-#include "librebble.h"
+#include "uuid.h"
+#include "window.h"
+#include "single_notification_layer.h"
 
-typedef enum NotificationAction
-{
-    NotificationActionDismiss = 0,
-    NotificationActionDismissAll = 1,
-    NotificationActionReply = 2,
-    NotificationActionCustom = 3
-} NotificationAction;
-
-typedef struct NotificationWindow NotificationWindow;
-
-typedef struct Notification Notification;
-
-struct Notification
-{
-    GBitmap *icon;
-    const char *app_name;
-    const char *title;
-    const char *body;
-    char *custom_actions;
-    GColor color;
+typedef struct NotificationWindow {
+    Window  *window;
+    Uuid    *uuids;
+    size_t   nuuids;
     
-    // Doubly linked list
-    Notification *next;
-    Notification *previous;
-};
+    size_t   curnotif;
+    uint16_t curnotif_height;
+    int16_t  curnotif_scroll;
+    int      curnotif_nudging;
+    
+    SingleNotificationLayer n1;
+    SingleNotificationLayer n2;
+    
+    ClickConfigProvider clickconfig;
+    void *clickconfigcontext;
+} NotificationWindow;
 
-struct NotificationWindow
-{
-    Window *window;
-    int offset;
-    NotificationAction *actions;
-    Notification *active;
-};
-
-Notification* notification_window_create(const char *app_name, const char *title, const char *body, GBitmap *icon, GColor color);
-
-Window* notification_window_get_window(NotificationWindow *notification_window);
-
-void notification_window_update_proc(Layer *layer, GContext *context);
+void notification_window_ctor(NotificationWindow *nw, Window *w);
+void notification_window_dtor(NotificationWindow *w);
+void notification_window_set_notifications(NotificationWindow *w, Uuid *uuids, size_t count, size_t curnotif);
+void notification_window_push_to_top(NotificationWindow *w, Uuid *uuid);
+Window *notification_window_get_window(NotificationWindow *w);
+void notification_window_set_click_config(NotificationWindow *w, ClickConfigProvider config, void *context);

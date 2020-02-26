@@ -8,19 +8,20 @@
  */
 
 #include <stdlib.h>
-#include "rebbleos.h"
-#include "librebble.h"
+#include "appmanager_thread.h"
 #include "appmanager.h"
+
 #include "systemapp.h"
 #include "test.h"
 #include "notification.h"
 #include "api_func_symbols.h"
 #include "qalloc.h"
+#include "notification_manager.h"
 
 /* Configure Logging */
 #define MODULE_NAME "appman"
 #define MODULE_TYPE "KERN"
-#define LOG_LEVEL RBL_LOG_LEVEL_DEBUG //RBL_LOG_LEVEL_ERROR
+#define LOG_LEVEL RBL_LOG_LEVEL_ERROR //RBL_LOG_LEVEL_ERROR
 
 /*
  * Module TODO
@@ -35,20 +36,17 @@ static TaskHandle_t _app_thread_manager_task_handle;
 static xQueueHandle _app_thread_queue;
 static StaticTask_t _app_thread_manager_task;
 static void _appmanager_thread_init(void *pvParameters);
-
+static void _appmanager_update_progress_bar(uint32_t progress, uint32_t total, uint8_t type);
 static void _running_app_loop(void);
+
+enum {
+    AppLoaded,
+    AppInvalid,
+};
 
 /* The manager thread needs only a small stack */
 #define APP_THREAD_MANAGER_STACK_SIZE 450
 static StackType_t _app_thread_manager_stack[APP_THREAD_MANAGER_STACK_SIZE];  // stack + heap for app (in words)
-
-/* Our pre allocated heaps for the different threads 
- * it's tempting to over engineer this and make it a node list
- * or at least add dynamicness to it. But honestly we have 3 threads
- * max at the moment, so if we get there, maybe */
-static uint8_t _heap_app[MEMORY_SIZE_APP_HEAP];
-static MEM_REGION_HEAP_WRK uint8_t _heap_worker[MEMORY_SIZE_WORKER_HEAP];
-static MEM_REGION_HEAP_OVL uint8_t _heap_overlay[MEMORY_SIZE_OVERLAY_HEAP];
 
 /* keep these stacks off CCRAM */
 static StackType_t _stack_app[MEMORY_SIZE_APP_STACK];
@@ -60,8 +58,7 @@ static app_running_thread _app_threads[MAX_APP_THREADS] = {
     {
         .thread_type = AppThreadMainApp,
         .thread_name = "MainApp",
-        .heap_size = MEMORY_SIZE_APP_HEAP,
-        .heap = _heap_app,
+        .heap = &mem_heaps[HEAP_APP],
         .stack_size = MEMORY_SIZE_APP_STACK,
         .stack = _stack_app,
         .thread_entry = &appmanager_app_main_entry,
@@ -70,8 +67,7 @@ static app_running_thread _app_threads[MAX_APP_THREADS] = {
     {
         .thread_type = AppThreadWorker,
         .thread_name = "Worker",
-        .heap_size = MEMORY_SIZE_WORKER_HEAP,
-        .heap = _heap_worker,
+        .heap = &mem_heaps[HEAP_WORKER],
         .stack_size = MEMORY_SIZE_WORKER_STACK,
         .stack = _stack_worker,
         /*.thread_entry = &appmanager_worker_main_entry */
@@ -80,14 +76,12 @@ static app_running_thread _app_threads[MAX_APP_THREADS] = {
     {
         .thread_type = AppThreadOverlay,
         .thread_name = "Overlay",
-        .heap_size = MEMORY_SIZE_OVERLAY_HEAP,
-        .heap = _heap_overlay,
+        .heap = &mem_heaps[HEAP_OVERLAY],
         .stack_size = MEMORY_SIZE_OVERLAY_STACK,
         .stack = _stack_overlay,
         .thread_priority = 9UL,
     }
 };
-
 
 uint8_t appmanager_init(void)
 {
@@ -109,6 +103,11 @@ uint8_t appmanager_init(void)
     LOG_INFO("App thread created");
     
     return 0;
+}
+
+app_running_thread *appmanager_get_threads(void)
+{
+    return _app_threads;
 }
 
 app_running_thread *_get_current_thread(void)
@@ -138,13 +137,14 @@ app_running_thread *appmanager_get_current_thread(void)
     return th;
 }
 
+
 /*
  * Get the current thread's running ->app structure
  */
 App *appmanager_get_current_app(void)
 {
     app_running_thread *th = appmanager_get_current_thread();
-    assert(th->app && "There is no app!");
+    //assert(th->app && "There is no app!");
     
     return th->app;
 }
@@ -193,6 +193,179 @@ bool appmanager_is_thread_worker(void)
     return appmanager_get_thread_type() == AppThreadWorker;
 }
 
+static inline bool _app_executes_from_internal_rom(App *app) {
+    return app->flags & 1 << ExecuteFromInternalFlash;
+}
+
+static inline bool _app_file_present(App *app)
+{
+    return app->flags & 1 << AppFilePresent;
+}
+
+static inline bool _app_resource_file_present(App *app)
+{
+    return app->flags & 1 << ResourceFilePresent;
+}
+
+void appmanager_app_set_flag(App *app, uint8_t flag, bool value)
+{
+    app->flags = (app->flags & ~(1 << flag)) | ((value == true ? 1 : 0) << flag);
+}
+
+static void _draw(uint8_t state)
+{
+    static TickType_t _last_complete_draw = 0;
+    static uint8_t _last_state = 2;
+
+    if (!state && _last_state != 2 && _last_complete_draw + pdMS_TO_TICKS(250) < xTaskGetTickCount())
+    {
+        LOG_ERROR("We lost a draw packet! %d", _last_state);
+        display_buffer_lock_give();
+        _last_state = 2;
+    }
+
+    if (!state && !_last_state) {
+        LOG_DEBUG("Draw in progress! %d", _last_state);
+        return;
+    }
+
+    _last_state = state;
+    
+    switch (state)
+    {
+        case 0:
+            /* Request a draw. This is mostly from an app invalidating something */
+            if (display_buffer_lock_take(0))
+            {
+                _last_complete_draw = xTaskGetTickCount();
+                if (appmanager_is_app_running())
+                    appmanager_post_draw_app_message(1);
+                else {
+                    _draw(1);
+                }
+            }
+            else
+            {
+                LOG_DEBUG("Lock Not Acquired");
+                break;
+            }
+            break;
+        case 1:            
+            if (overlay_window_count() > 0) {
+                overlay_window_draw(true);
+            } else {
+                _draw(2);
+            }
+            break;
+        case 2:
+            display_draw();
+            display_buffer_lock_give();
+            LOG_DEBUG("Render Time %dms", xTaskGetTickCount() - _last_complete_draw);
+            break;
+    }
+}
+
+static void _appmanager_thread_state_update(uint32_t app_id, uint8_t thread_id, AppMessage *am)
+{
+    app_running_thread *_this_thread = NULL;
+    uint32_t total_app_size = 0;
+    _this_thread = &_app_threads[thread_id];
+    ApplicationHeader header;   /* TODO change to malloc so we can free after load? */
+    
+    if (_this_thread->status == AppThreadLoading || 
+        _this_thread->status == AppThreadLoaded || 
+        _this_thread->status == AppThreadRunloop)
+    {
+        return;
+    }
+    else if (_this_thread->status == AppThreadUnloading)
+    {
+        /* it's closing down */
+        LOG_INFO("Waiting for app to close...");
+
+        return;
+    }
+    else if (_this_thread->status == AppThreadDownloading)
+    {
+        if (_this_thread->app_start_tick > 0 && 
+            _this_thread->app_start_tick + pdMS_TO_TICKS(6000) < xTaskGetTickCount()) {
+                LOG_ERROR("Timed out loading app");
+                _this_thread->status = AppThreadUnloaded;
+                appmanager_app_start("System");
+        }
+    }
+    else if (_this_thread->status == AppThreadUnloaded)
+    {
+        LOG_INFO("Starting app %d", app_id);
+        _this_thread->status = AppThreadLoading;
+        
+        if (app_manager_get_apps_head() == NULL)
+        {
+            LOG_ERROR("No Apps found!");
+            assert(!"No Apps");
+            return;
+        }
+
+        App *app = appmanager_get_app_by_id(app_id);
+        LOG_INFO("Starting app %s", app->name);
+        
+        if (app == NULL)
+        {
+            LOG_ERROR("App %d NOT found!", app_id);
+            assert(!"App not found!");
+            return;
+        }
+
+        /* We have an app that's at least known. push on with loading it */
+        _this_thread->app = app;
+        _this_thread->timer_head = NULL;
+        
+        /* At this point the existing task should be gone already
+        * If it isn't we kill it. Lets complain though, becuase it's
+        * broken if we are here */
+        if (_this_thread->task_handle != NULL) {
+            vTaskDelete(_this_thread->task_handle);
+            _this_thread->task_handle = NULL;
+            LOG_ERROR("The previous task was still running. FIXME");
+        }
+        
+        mem_heap_init(_this_thread->heap);
+
+        /* If the app is running off RAM (i.e it's a PIC loaded app...) 
+        * and not system, we need to patch it */
+        if (!_app_executes_from_internal_rom(app))
+        {
+            /* Check to see if we have app and resource files */
+            if (!_app_file_present(app))
+            {
+                /* We now request the app from the host device */
+                protocol_app_fetch_request(&app->uuid, app->id);
+                _this_thread->status = AppThreadDownloading;
+                
+                notification_progress *prog = mem_heap_alloc(&mem_heaps[HEAP_LOWPRIO], sizeof(notification_progress));
+                if (prog) {
+                    memset(prog, 0, sizeof(*prog));
+                    event_service_post(EventServiceCommandProgress, prog, (void *)remote_free);
+                }
+                
+                LOG_INFO("Requesting App from host %x", app);
+                return;
+            }
+        
+            if (appmanager_load_app(_this_thread, &header) != AppLoaded)
+                return;
+            total_app_size = header.virtual_size;
+        }
+        else
+        {
+            total_app_size = 0;
+        }
+        
+        /* Execute the app we just loaded */
+        appmanager_execute_app(_this_thread, total_app_size);
+    }
+}
+
 /*
  * A task to run an application.
  * 
@@ -212,141 +385,123 @@ bool appmanager_is_thread_worker(void)
  */
 static void _app_management_thread(void *parms)
 {
-    ApplicationHeader header;   /* TODO change to malloc so we can free after load? */
-    char *app_name;
-    AppMessage am;
-    uint32_t total_app_size = 0;
-    app_running_thread *_this_thread = NULL;
-    
+    static char *app_name;
+    static AppMessage am;
+    static app_running_thread *_this_thread = NULL;
+    static uint32_t _app_to_load_id = 1;
+    static TickType_t _delay = portMAX_DELAY;
+
     for( ;; )
     {
         /* Sleep waiting for work to do */
-        if (xQueueReceive(_app_thread_queue, &am, pdMS_TO_TICKS(1000)))
+        if (xQueueReceive(_app_thread_queue, &am, pdMS_TO_TICKS(_delay)))
         {
+            _this_thread = &_app_threads[am.thread_id];
             switch(am.command)
             {
                 /* Load an app for someone. face or worker */
-                case THREAD_MANAGER_APP_LOAD:
-                    app_name = (char *)am.data;
-                    _this_thread = &_app_threads[am.thread_id];
+                case THREAD_MANAGER_APP_LOAD_ID:
+                    LOG_INFO("Quitting... %d", (uint32_t)am.data);
+                    uint32_t id = (uint32_t)am.data;
 
-                    if (_this_thread->status == AppThreadLoading || 
-                        _this_thread->status == AppThreadLoaded || 
-                        _this_thread->status == AppThreadRunloop)
-                    {
-                        /* post an app quit to the running process
-                         * then immediately post our received message back onto 
-                         * the queue behind the quit. 
-                         * Once the app is quit, we will continue 
-                         * TODO we could go around this merry-go-round for a while
-                         * we should track that or use a better mechanism.
-                         * in reality this isn't a big issue. A concern maybe
-                         */
-                        LOG_INFO("Quitting...");
-                        appmanager_app_quit();
-                        xQueueSendToBack(_app_thread_queue, &am, (TickType_t)100);
-                        continue;
+                    _app_to_load_id = id;
+                    if (_this_thread->status != AppThreadUnloaded) {
+                        appmanager_app_quit_request();
+                        _this_thread->app_start_tick = xTaskGetTickCount();
                     }
-                    else if (_this_thread->status == AppThreadUnloading)
-                    {
-                        /* it's closing down, keep reposting the message 
-                         * until we are free to launch 
-                         * TODO: this is pretty weak 
-                         * Make this a proper state machine, wait on completion 
-                         * and launch the app
-                         */
-                        LOG_INFO("Waiting for app to close...");
-                        vTaskDelay(pdMS_TO_TICKS(10));
-                        xQueueSendToBack(_app_thread_queue, &am, (TickType_t)100);
-                        continue;
-                    }
-                    
-                    LOG_INFO("Starting app %s", app_name);
-                    _this_thread->status = AppThreadLoading;
-                        
-                    /*  TODO reset clicks */
-                    tick_timer_service_unsubscribe();
-                    
-                    if (app_manager_get_apps_head() == NULL)
-                    {
-                        LOG_ERROR("No Apps found!");
-                        assert(!"No Apps");
-                        return;
-                    }
-                    
-                    App *app = appmanager_get_app(app_name);
-                    
-                    if (app == NULL)
-                    {
-                        LOG_ERROR("App %s NOT found!", app_name);
-                        assert(!"App not found!");
-                        continue;
-                    }
-
-                    /* We have an app that's at least known. push on with loading it */
-                    _this_thread->app = app;
-                    _this_thread->timer_head = NULL;
-                    
-                    /* At this point the existing task should be gone already
-                     * If it isn't we kill it. Lets complain though, becuase it's
-                     * broken if we are here */
-                    if (_this_thread->task_handle != NULL) {
-                        vTaskDelete(_this_thread->task_handle);
-                        _this_thread->task_handle = NULL;
-                        LOG_ERROR("The previous task was still running. FIXME");
-                    }
-                    
-                    /* If the app is running off RAM (i.e it's a PIC loaded app...) 
-                    * and not system, we need to patch it */
-                    if (!app->is_internal)
-                    {
-                        appmanager_load_app(_this_thread, &header);
-                        total_app_size = header.virtual_size;
-                    }
-                    else
-                    {
-                        total_app_size = 0;
-                    }
-                    
-                    /* Execute the app we just loaded */
-                    appmanager_execute_app(_this_thread, total_app_size);
                     break;
-                case THREAD_MANAGER_APP_QUIT_CLEAN:
-                    _this_thread = &_app_threads[am.thread_id];
+                case THREAD_MANAGER_APP_DOWNLOAD_COMPLETE:
+                    LOG_INFO("Download Complete %d", id);
+                    App *capp = appmanager_get_app_by_id(_app_to_load_id);
+                    assert(capp);
+                    char buffer[14];
+
+                    snprintf(buffer, 14, "@%08lx/app", capp->id);
+                    if (fs_find_file(&capp->app_file, buffer) < 0) {
+                        LOG_ERROR("App File %s not found", buffer);
+                        appmanager_app_set_flag(capp, AppFilePresent, false);
+                        _this_thread->status = AppThreadUnloaded;
+                        break;
+                    }
+                    snprintf(buffer, 14, "@%08lx/res", capp->id);
+                    if (fs_find_file(&capp->resource_file, buffer) < 0) {
+                        LOG_ERROR("Res File %s not found", buffer);
+                        appmanager_app_set_flag(capp, ResourceFilePresent, false);
+                        appmanager_app_quit_done();
+                        break;
+                    }
+                    appmanager_app_set_flag(capp, AppFilePresent, true);
+                    appmanager_app_set_flag(capp, ResourceFilePresent, true);
                     
+                    LOG_INFO("Download Complete %x", capp);
+
+                     _this_thread->status = AppThreadUnloaded;
+                    break;
+                case THREAD_MANAGER_APP_QUIT_REQUEST:
+                    if (_this_thread->status == AppThreadDownloading) {
+                        break;
+                    }
+                    /* remove all of the clck handlers */
+                    button_unsubscribe_all();
+
+                    /* remove the ticktimer service handler and stop it */
+                    tick_timer_service_unsubscribe_thread(_this_thread);
+                    connection_service_unsubscribe_thread(_this_thread);
+                    event_service_unsubscribe_thread_all(_this_thread);
+                    
+                    appmanager_app_quit();
+
+                    /* Set the shutdown time for this app. We will kill it then */
+                    if (!appmanager_is_app_shutting_down()) {
+                        _delay = _this_thread->shutdown_at_tick = xTaskGetTickCount() + pdMS_TO_TICKS(5000);
+                        _this_thread->status = AppThreadUnloading;
+                    }
+                    break;
+                case THREAD_MANAGER_APP_HEARTBEAT:
+                    /* App is pulsing to us. lets update its kill time */
+                    _this_thread->shutdown_at_tick = xTaskGetTickCount() + pdMS_TO_TICKS(2000);
+                    break;
+                case THREAD_MANAGER_APP_TEARDOWN:
                     if (_this_thread->status != AppThreadUnloading)
                         LOG_WARN("Unloading app while not in correct state!");
                     
                     /* We were signalled that the app has finished cleanly */
-                    LOG_DEBUG("App finished cleanly");
+                    LOG_DEBUG("Tearing app down %x", am.thread_id);
                     
-                    /* The task will die hard, but it did finish the runloop */
+                    /* The task will die hard now */
+                    assert(_this_thread->task_handle);
+
+                    vTaskDelay(2); /* We yield to the thread to it can sit in wait */
                     vTaskDelete(_this_thread->task_handle);
                     _this_thread->task_handle = NULL;
                     _this_thread->shutdown_at_tick = 0;
                     _this_thread->app = NULL;
                     _this_thread->status = AppThreadUnloaded;
+
+                    _delay = portMAX_DELAY;
                     break;
-            }        
-        }
-        else
-        {
-            /* We woke up to check if we need to kill anything */
-            /* check all threads */
-            for (uint8_t i = 0; i < MAX_APP_THREADS; i++)
-            {
-                _this_thread = &_app_threads[i];
-                if (_this_thread->shutdown_at_tick > 0 &&
-                        xTaskGetTickCount() >= _this_thread->shutdown_at_tick)
-                {
-                    LOG_ERROR("!! Hard terminating app");
-                    
-                    vTaskDelete(_this_thread->task_handle);
-                    _this_thread->shutdown_at_tick = 0;
-                    _this_thread->status = AppThreadUnloaded;
-                }
-                /* app really should have died by now */
+                case THREAD_MANAGER_APP_DRAW:
+                    _draw((uint32_t)am.data);
+                    break;
             }
+        }
+    
+        _appmanager_thread_state_update(_app_to_load_id, am.thread_id, &am);
+        /* We woke up to check if we need to kill anything */
+        /* check all threads */
+        for (uint8_t i = 0; i < MAX_APP_THREADS; i++)
+        {
+            _this_thread = &_app_threads[i];
+            if (_this_thread->shutdown_at_tick > 0 &&
+                    xTaskGetTickCount() >= _this_thread->shutdown_at_tick)
+            {
+                LOG_ERROR("!! Hard terminating app");
+                
+                vTaskDelete(_this_thread->task_handle);
+                _this_thread->shutdown_at_tick = 0;
+                _this_thread->status = AppThreadUnloaded;
+            }
+            /* app really should have died by now */
         }
 
         /* around we go again */
@@ -417,20 +572,30 @@ static void _app_management_thread(void *parms)
     * fork
         
     */
-void appmanager_load_app(app_running_thread *thread, ApplicationHeader *header)
+int appmanager_load_app(app_running_thread *thread, ApplicationHeader *header)
 {   
     struct fd fd;
     
-    /* de-fluff */
-    memset(thread->heap, 0, thread->heap_size);
-
     fs_open(&fd, &thread->app->app_file);
     fs_read(&fd, header, sizeof(ApplicationHeader));
 
+    /* sanity check the hell out of this to make sure it's a real app */
+    if (strncmp(header->header, "PBLAPP", 6))
+    {
+        KERN_LOG("app", APP_LOG_LEVEL_ERROR, "No PBLAPP header!");
+        return AppInvalid;
+    }
+    
+    void *app = mem_heap_alloc(thread->heap, header->app_size + (header->reloc_entries_count * 4));
+    if (!app) {
+        KERN_LOG("app", APP_LOG_LEVEL_ERROR, "no RAM for app (sz %d)", header->app_size + (header->reloc_entries_count * 4));
+        return AppInvalid;
+    }
+    
     /* load the app from flash
      *  and any reloc entries too. */
     fs_seek(&fd, 0, FS_SEEK_SET);
-    fs_read(&fd, thread->heap, header->app_size + (header->reloc_entries_count * 4));
+    fs_read(&fd, app, header->app_size + (header->reloc_entries_count * 4));
     
     /* apps get loaded into heap like so
      * [App Header | App Binary | App Heap | App Stack]
@@ -445,7 +610,7 @@ void appmanager_load_app(app_running_thread *thread, ApplicationHeader *header)
      * (global offset table) entries
      * The reloc table actually sits in BSS section, so once we have done
      * we wipe the BSS again. */
-    uint8_t *reloc_table_addr = thread->heap + header->app_size;
+    uint8_t *reloc_table_addr = app + header->app_size;
     
     /* Now we have the relocs to do, we are in standard ELF dyn loader mode 
      * (albeit without having to deal with relocating PLTs)
@@ -465,28 +630,31 @@ void appmanager_load_app(app_running_thread *thread, ApplicationHeader *header)
             
             /* Get the value from the register we are relocating.
              * This will contain the offset from the app base to the data */
-            uint32_t rel_off = read_32(thread->heap + reg_to_reloc);
+            uint32_t rel_off = read_32(app + reg_to_reloc);
             
             /* Add the app base absolute memory register address to the offset
              * Write this absolute value back into the register to relocate */
-            write_32(thread->heap + reg_to_reloc, (uint32_t)((uintptr_t)(thread->heap + rel_off)));
+            write_32(app + reg_to_reloc, (uint32_t)((uintptr_t)(app + rel_off)));
         }
     }
     
     /* init bss to 0. We already zeros all of the heap, so only reset the reloc table */
     uint32_t bss_size = header->virtual_size - header->app_size;
     
-    memset(thread->heap + header->app_size, 0, header->reloc_entries_count * 4);
+    app = mem_heap_realloc(thread->heap, app, header->virtual_size);
+    if (!app) {
+        KERN_LOG("app", APP_LOG_LEVEL_ERROR, "no RAM for app BSS (size %d)", header->virtual_size);
+        return AppInvalid;
+    }
+    memset(app + header->app_size, 0, bss_size);
     memset(thread->stack, 0, thread->stack_size * 4);
     
     /* load the address of our lookup table into the 
      * special register in the app. */
-    write_32(&thread->heap[header->sym_table_addr], (int32_t)sym);
-
-    assert(read_32(&thread->heap[header->sym_table_addr]) == (int32_t)sym && "PLT rewrite failed");
+    write_32(app + header->sym_table_addr, (int32_t)sym);
      
     /* Patch the app's entry point... make sure its THUMB bit set! */
-    thread->app->main = (AppMainHandler)((uint32_t)&thread->heap[header->offset] | 1);
+    thread->app->main = (AppMainHandler)((uint32_t)(app + header->offset) | 1);
     
     LOG_DEBUG("== App signature ==");
     LOG_DEBUG("Header  : %s",    header->header);
@@ -496,7 +664,7 @@ void appmanager_load_app(app_running_thread *thread, ApplicationHeader *header)
                                                             header->app_version.minor);
     LOG_DEBUG("App Size: 0x%x",  header->app_size);
     LOG_DEBUG("App Main: 0x%x",  header->offset);
-    LOG_DEBUG("CRC     : %d",    header->crc);
+    LOG_DEBUG("CRC     : 0x%x",  header->crc);
     LOG_DEBUG("Name    : %s",    header->name);
     LOG_DEBUG("Company : %s",    header->company);
     LOG_DEBUG("Icon    : %d",    header->icon_resource_id);
@@ -506,7 +674,9 @@ void appmanager_load_app(app_running_thread *thread, ApplicationHeader *header)
     LOG_DEBUG("== Memory signature ==");
     LOG_DEBUG("VSize   : 0x%x",  header->virtual_size);
     LOG_DEBUG("Bss Size: %d",    bss_size);
-    LOG_DEBUG("Heap    : 0x%x",  thread->heap + header->virtual_size);
+    LOG_DEBUG("Heap    : 0x%x",  app + header->virtual_size);
+    
+    return AppLoaded;
 }
 
 /* 
@@ -514,20 +684,10 @@ void appmanager_load_app(app_running_thread *thread, ApplicationHeader *header)
  */
 void appmanager_execute_app(app_running_thread *thread, uint32_t total_app_size)
 {    
-    /* Calculate the heap size of the remaining memory */
-    uint32_t heap_size = thread->heap_size - total_app_size;
-    /* Where is our heap going to start. It's directly after the app + bss */
-    uint8_t *heap_entry = &thread->heap[total_app_size];
 
-    LOG_DEBUG("Exec: Base 0x%x, heap 0x%x, sz %d (b), stack 0x%x, sz %d (w)", 
-            thread->heap,
-            heap_entry,
-            heap_size,
+    LOG_DEBUG("exec app: stack 0x%x, sz %d (w)", 
             thread->stack, 
             thread->stack_size);
-    
-    /* heap is all uint8_t */
-    thread->arena = qinit(heap_entry, heap_size);
     
     /* Load the app in a vTask */
     xTaskCreateStatic(_appmanager_thread_init, 

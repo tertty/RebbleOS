@@ -269,21 +269,10 @@ size_t stm32_usart_write(stm32_usart_t *usart, const uint8_t *buf, size_t len)
     stm32_power_request(usart->config->usart_periph_bus, usart->config->usart_clock);
     stm32_power_request(STM32_POWER_AHB1, usart->config->gpio_clock);
 
-    /* From tintin. Checks TC not TXE
-        for (i = 0; i < len; i++) {
-        if (p[i] == '\n') {
-            while (!(USART3->SR & USART_SR_TC));
-            USART3->DR = '\r';
-        }
-
-        while (!(USART3->SR & USART_SR_TC));
-        USART3->DR = p[i];
-    }
-    */
     int i;
     for (i = 0; i < len; i++)
     {
-        if (buf[i] == '\n') {
+        if (buf[i] == '\n' && !usart->config->is_binary) {
             while (!(usart->config->usart->SR & USART_SR_TC));
             usart->config->usart->DR = '\r';
         }
@@ -307,9 +296,8 @@ size_t stm32_usart_read(stm32_usart_t *usart, uint8_t *buf, size_t len)
 
     for (i = 0; i < len; i++)
     {
-//         while (!(usart->config->usart->SR & USART_FLAG_RXNE));
-        if (_timeout(usart->config->usart->SR & USART_FLAG_RXNE, 10))
-            break;
+        /* If ther eis no more data, don't wait, just return what we got */
+        if (!(usart->config->usart->SR & USART_FLAG_RXNE)) break;
         ((uint8_t *) buf)[i] = USART_ReceiveData(usart->config->usart);
     }
 

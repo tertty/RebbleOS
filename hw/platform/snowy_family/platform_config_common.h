@@ -1,19 +1,19 @@
 #pragma once
 #include "stm32f4xx.h"
 
-#define RTOS_HEAP_SIZE 30 * 1024
-
 /* Size of the app + stack + heap of the running app. 
    IN BYTES
  */ 
+#define MEMORY_SIZE_SYSTEM        30000
+#define MEMORY_SIZE_LOWPRIO       2048
 #define MEMORY_SIZE_APP           90000
 #define MEMORY_SIZE_WORKER        10500
-#define MEMORY_SIZE_OVERLAY       18000
+#define MEMORY_SIZE_OVERLAY       18500
 
 /* Size of the stack in WORDS */
 #define MEMORY_SIZE_APP_STACK     3000
 #define MEMORY_SIZE_WORKER_STACK  250
-#define MEMORY_SIZE_OVERLAY_STACK 350
+#define MEMORY_SIZE_OVERLAY_STACK 450
 
 
 #define MEMORY_SIZE_APP_HEAP      MEMORY_SIZE_APP - (MEMORY_SIZE_APP_STACK * 4)
@@ -60,6 +60,9 @@
  * into memory bank 2. Note bank 2 is NOT DMA capable
  */
 #define MEM_REGION_CCRAM __attribute__((section(".ccmram")))
+
+#define PLATFORM_FLASH_PAGE_MASK 0xFFFFFFC0
+#define PLATFORM_FLASH_PAGE_SIZE 64
 
 
 //Snowy uses OC1 for backlight

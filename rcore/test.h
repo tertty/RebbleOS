@@ -12,7 +12,8 @@
 #include "protocol.h"
 
 uint8_t test_init(void);
-void test_packet_handler(const pbl_transport_packet *packet);
+void test_packet_handler(const RebblePacket packet);
+void test_packet_loopback_handler(const RebblePacket packet);
 
 typedef int (*testfn_t)(uint32_t *artifact);
 #define TESTNAME_LEN 32
@@ -35,7 +36,8 @@ static int test_##name(uint32_t *artifact)
 #else
 
 #define TEST(name) \
-static int test_## #name(uint32_t artifact) __attribute__((section(".throwaway")))
+static int TEST_##name##_macro_called_outside_of_REBBLEOS_TESTING_barf_barf_barf[-1]; \
+static int test_##name(uint32_t artifact)
 
 #endif
 

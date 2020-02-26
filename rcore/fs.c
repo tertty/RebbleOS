@@ -10,8 +10,6 @@
 #include "fs.h"
 #include "fs_internal.h"
 #include "flash.h"
-#include "blob_db_ramfs.h"
-#include "test.h"
 
 /* XXX: should filesystem bits and bobs get split out somewhere else? 
  * Probably, but who's counting, anyway?  */
@@ -81,8 +79,9 @@ static int _fs_page_table_init()
      * state table, and find the earliest, lowest, page with the smallest
      * erase count.
      *
-     * XXX: Of course, this will get blown away as soon as it gets claimed
-     * as the GC page, but oh well.  It's just an optimization.  */
+     * XXX: The lastpg optimization is bizarre; we seem to have it down now,
+     * but it's not really clear how exactly this was supposed to work.
+     */
     
     _fs_lastpg = -1;
     _fs_best_erase_count = 0xFFFFFFFF;
@@ -112,6 +111,7 @@ static int _fs_page_table_init()
             if (!saw_page_in_outer_space)
                 KERN_LOG("flash", APP_LOG_LEVEL_ERROR, "page %d is marked as allocated, but page %d had the last page marker... hmm...", pg, _fs_lastpg);
             saw_page_in_outer_space = 1;
+            _fs_lastpg = pg;
         }
         
         if (!FLASHFLAG(pagehdr.empty, HDR_EMPTY_ALLOCATED) || /* block has never been written to */
@@ -208,6 +208,13 @@ static int _fs_page_alloc()
     return -1;
 }
 
+static int _update_moreblocks(int pg) {
+    struct fs_page_hdr pagehdr;
+    _fs_read_page_ofs(pg, 0, &pagehdr, sizeof(pagehdr));
+    pagehdr.empty &= ~HDR_EMPTY_ALLOCATED;
+    return _fs_write_page_ofs(pg, 0, &pagehdr, sizeof(pagehdr));
+}
+
 /*** GC routines. ***/
 
 static int _gc_sector;
@@ -268,11 +275,22 @@ static void _fs_gc_find_sector()
     
     _gc_sector = best_sector;
     assert(_gc_sector != -1);
-    KERN_LOG("flash", APP_LOG_LEVEL_INFO, "chose GC sector of %d, with erase count %d", _gc_sector, lowest_erase_count);
+    KERN_LOG("flash", APP_LOG_LEVEL_INFO, "chose GC sector of %d-%d, with erase count %d", _gc_sector, _gc_sector + PAGES_PER_SECTOR - 1, lowest_erase_count);
     
-    /* Mark it all as in use so the allocator doesn't come for it. */
+    /* Mark it all as in use so the allocator doesn't come for it.  Also,
+     * mark it moreblocks so that we scan for things that come after it.
+     */
     for (int i = 0; i < PAGES_PER_SECTOR; i++) {
+        struct fs_page_hdr pagehdr;
+        
         _fs_set_page_state(_gc_sector + i, PageStateDirty);
+        _fs_read_page_ofs(_gc_sector + i, 0, &pagehdr, sizeof(pagehdr));
+        pagehdr.empty &= ~(HDR_EMPTY_MOREBLOCKS | HDR_EMPTY_ALLOCATED);
+        
+        assert(_update_moreblocks(_gc_sector + i + 1) >= 0);
+        
+        int rv = _fs_write_page_ofs(_gc_sector + i, 0, &pagehdr, sizeof(pagehdr));
+        assert(rv >= 0);
     }
 }
 
@@ -367,7 +385,7 @@ void fs_init()
             assert(_delete_file_by_pg(pg) == 0);
             continue;
         }
-        if (hdr->st_tmp_file) {
+        if (hdr->st_tmp_file && hdr->st_delete_complete) {
             KERN_LOG("flash", APP_LOG_LEVEL_ERROR, "page %d is a temp file; cleaning up", pg);
             assert(_delete_file_by_pg(pg) == 0);
             continue;
@@ -447,11 +465,11 @@ int fs_find_file(struct file *file, const char *name)
         if (_fs_get_page_state(pg) == PageStateFileStart)
         {
             _fs_read_file_hdr(pg, &buffer);
-            if (!strcmp(name, buffer.name)) {
+            if (!strcmp(name, buffer.name) && (hdr->st_tmp_file == 0x0000)) {
                 file->startpage = pg;
                 file->size = hdr->file_size;
                 file->startpofs = sizeof(struct fs_file_hdr) + hdr->filename_len;
-                file->is_ramfs = 0;
+                file->flags = FILE_HAS_DIRENT;
                 return 0;
             }
         }
@@ -471,9 +489,12 @@ static uint16_t _fs_verily_alloc_page(enum page_state st)
     assert(pg >= 0);
     
     _fs_set_page_state(pg, st);
+    if (pg > _fs_lastpg)
+        _fs_lastpg = pg;
     
     return (uint16_t) pg;
 }
+
 
 struct fd *fs_creat_replacing(struct fd *fd, const char *name, size_t bytes, const struct file *previous /* can be NULL */)
 {
@@ -481,6 +502,12 @@ struct fd *fs_creat_replacing(struct fd *fd, const char *name, size_t bytes, con
     size_t fs_bytes = bytes + (name ? strlen(name) : 0) + sizeof(struct fs_file_hdr) - sizeof(struct fs_page_hdr);
     size_t bytes_in_pg = REGION_FS_PAGE_SIZE - sizeof(struct fs_page_hdr);
     size_t npgs = fs_bytes / bytes_in_pg + ((fs_bytes % bytes_in_pg) ? 1 : 0);
+    
+    if (previous && !(previous->flags & FILE_HAS_DIRENT)) {
+        KERN_LOG("flash", APP_LOG_LEVEL_ERROR, "cannot replace file %s that ain't a real file", name);
+        assert(0);
+        return NULL;
+    }
     
     KERN_LOG("flash", APP_LOG_LEVEL_DEBUG, "preparing to create file %s with %d pages (%d bytes)", name, npgs, bytes);
     if (_fs_free_pages < npgs)
@@ -511,7 +538,7 @@ struct fd *fs_creat_replacing(struct fd *fd, const char *name, size_t bytes, con
             memset(&filehdr, 0xFF, sizeof(filehdr));
             
             filehdr.v_0x5001 = 0x5001;
-            filehdr.empty = pagehdr.empty & ~HDR_EMPTY_MOREBLOCKS;
+            filehdr.empty = pagehdr.empty & ~(HDR_EMPTY_MOREBLOCKS | HDR_EMPTY_ALLOCATED);
             filehdr.status &= ~(HDR_STATUS_VALID | HDR_STATUS_FILE_START);
             /* XXX: update 'empty' status for someone else? */
             filehdr.wear_level_counter = pagehdr.wear_level_counter;
@@ -524,23 +551,30 @@ struct fd *fs_creat_replacing(struct fd *fd, const char *name, size_t bytes, con
                 filehdr.flag_2 &= ~HDR_FLAG_2_HAS_FILENAME;
             assert(strlen(name) < MAX_FILENAME_LEN);
             filehdr.filename_len = strlen(name);
-            if (!previous)
-                filehdr.st_tmp_file = 0x0;
+            
+            assert(_update_moreblocks(pg + 1) >= 0);
             
             int rv = _fs_write_page_ofs(pg, 0, &filehdr, sizeof(filehdr));
             assert(rv >= 0);
+            
+            if (name) {
+                rv = _fs_write_page_ofs(pg, sizeof(filehdr), name, strlen(name));
+                assert(rv >= 0);
+            }
             
             KERN_LOG("flash", APP_LOG_LEVEL_DEBUG, "wrote start page at %d", pg);
             
             /* Write it down for later to finish the create_complete op. */
             startpg = pg;
         } else {
-            pagehdr.empty &= ~HDR_EMPTY_MOREBLOCKS;
-            pagehdr.status &= ~(HDR_STATUS_VALID | HDR_STATUS_FILE_START);
+            pagehdr.empty &= ~(HDR_EMPTY_MOREBLOCKS | HDR_EMPTY_ALLOCATED);
+            pagehdr.status &= ~(HDR_STATUS_VALID | HDR_STATUS_FILE_CONT);
             pagehdr.next_page = nextpg;
             pagehdr.next_page_crc = fs_next_page_crc(nextpg);
             pagehdr.pagehdr_crc = fs_pagehdr_crc(&pagehdr);
             
+            assert(_update_moreblocks(pg + 1) >= 0);
+
             int rv = _fs_write_page_ofs(pg, 0, &pagehdr, sizeof(pagehdr));
             assert(rv >= 0);
             
@@ -556,8 +590,8 @@ struct fd *fs_creat_replacing(struct fd *fd, const char *name, size_t bytes, con
     
     fd->file.startpage = startpg;
     fd->file.startpofs = (name ? strlen(name) : 0) + sizeof(struct fs_file_hdr);
-    fd->file.is_ramfs = 0;
     fd->file.size = bytes;
+    fd->file.flags = FILE_HAS_DIRENT;
     
     fd->curpage = fd->file.startpage;
     fd->curpofs = fd->file.startpofs;
@@ -585,6 +619,36 @@ void fs_open(struct fd *fd, const struct file *file)
     fd->curpofs = fd->file.startpofs;
     
     fd->offset  = 0;
+    
+    memset(&fd->replaces, 0x0, sizeof(fd->replaces));
+}
+
+void fs_file_from_file(struct file *file, const struct file *from, size_t offset, size_t len)
+{
+    struct fd fd;
+    
+    fs_open(&fd, from);
+    fs_seek(&fd, offset, FS_SEEK_SET);
+    
+    *file = *from;
+    file->flags &= ~FILE_HAS_DIRENT;
+    file->startpage = fd.curpage;
+    file->startpofs = fd.curpofs;
+
+    if (file->size < offset)
+        file->size = 0;
+    else
+        file->size -= offset;
+    if (file->size > len)
+        file->size = len;
+}
+
+void fs_file_from_flash(struct file *file, size_t addr, size_t len) 
+{
+    file->flags = FILE_IS_RAW_FLASH;
+    file->startpage = 0;
+    file->startpofs = addr;
+    file->size = len;
 }
 
 void fs_mark_written(struct fd *fd)
@@ -612,6 +676,14 @@ void fs_mark_written(struct fd *fd)
         
         /* Then shoot the old one in the head completely. */
         _delete_file_by_pg(fd->replaces.startpage);
+    } else {
+        /* Simply mark the file as done writing. */
+        struct fs_file_hdr filehdr;
+        
+        _fs_read_page_ofs(fd->file.startpage, 0, &filehdr, sizeof(filehdr));
+        filehdr.st_tmp_file = 0x0;
+        rv = _fs_write_page_ofs(fd->file.startpage, 0, &filehdr, sizeof(filehdr));
+        assert(rv >= 0);
     }
     
     memset(&fd, 0, sizeof(fd));
@@ -619,14 +691,20 @@ void fs_mark_written(struct fd *fd)
 
 int fs_read(struct fd *fd, void *p, size_t bytes)
 {
-    if (fd->file.is_ramfs)
-        return ramfs_read(fd, p, bytes);
-
     size_t bytesrem;
     
     if (bytes > (fd->file.size - fd->offset))
         bytes = fd->file.size - fd->offset;
     bytesrem = bytes;
+    
+    if (fd->file.flags & FILE_IS_RAW_FLASH)
+    {
+        /* Special case. */
+        flash_read_bytes(fd->curpofs, p, bytes);
+        fd->curpofs += bytes;
+        fd->offset += bytes;
+        return bytes;
+    }
 
     while (bytesrem)
     {
@@ -657,10 +735,9 @@ int fs_read(struct fd *fd, void *p, size_t bytes)
 
 int fs_write(struct fd *fd, const void *p, size_t bytes)
 {
-    if (fd->file.is_ramfs)
-        return ramfs_write(fd, p, bytes);
-
     size_t bytesrem;
+    
+    assert(!(fd->file.flags & FILE_IS_RAW_FLASH) && "cannot write to raw flash");
     
     if (bytes > (fd->file.size - fd->offset))
         bytes = fd->file.size - fd->offset;
@@ -693,12 +770,8 @@ int fs_write(struct fd *fd, const void *p, size_t bytes)
     return bytes;
 }
 
-
 long fs_seek(struct fd *fd, long ofs, enum seek whence)
 {
-    if (fd->file.is_ramfs)
-        return ramfs_seek(fd, ofs, whence);
-
     size_t newoffset;
     switch (whence)
     {
@@ -709,6 +782,13 @@ long fs_seek(struct fd *fd, long ofs, enum seek whence)
     
     if (newoffset > fd->file.size)
         newoffset = fd->file.size;
+    
+    if (fd->file.flags & FILE_IS_RAW_FLASH)
+    {
+        fd->curpofs = fd->file.startpofs + newoffset;
+        fd->offset = newoffset;
+        return newoffset;
+    }
     
     if (newoffset < fd->offset)
     {
@@ -740,4 +820,9 @@ long fs_seek(struct fd *fd, long ofs, enum seek whence)
     }
     
     return fd->offset;
+}
+
+long fs_size(struct fd *fd)
+{
+    return fd->file.size;
 }

@@ -27,9 +27,14 @@ void gpath_move_to_app(n_GPath * path, n_GPoint offset);
 // n_GPath * gpath_create_app(n_GPathInfo * path_info);
 
 GBitmap *graphics_capture_frame_buffer(n_GContext *context);
-GBitmap *graphics_capture_frame_buffer_format(n_GContext *context, GBitmap format);
+GBitmap *graphics_capture_frame_buffer_format(n_GContext *context, int format);
 void graphics_release_frame_buffer(n_GContext *context, GBitmap *bitmap);
 bool graphics_frame_buffer_is_captured(GContext * ctx);
 
 void grect_align(GRect *rect, const GRect *inside_rect, const GAlign alignment, const bool clip);
 void grect_standardize(GRect *rect);
+GColor graphics_gcolor_from_2bit(int color_2bit);
+void graphics_context_set_fill_color_2bit(GContext * ctx, int color);
+void graphics_context_set_stroke_color_2bit(GContext * ctx, int color);
+void gpath_fill_app_legacy(n_GContext * ctx, n_GPath * path);
+void graphics_context_set_text_color_2bit(GContext * ctx, int color);

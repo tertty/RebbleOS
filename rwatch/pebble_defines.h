@@ -10,22 +10,35 @@
 
 #ifdef PBL_RECT
 #define PBL_IF_RECT_ELSE(rct, round) (rct)
+#define PBL_IF_ROUND_ELSE(round, rct) (rct)
 #else
 #define PBL_IF_RECT_ELSE(rct, round) (round)
+#define PBL_IF_ROUND_ELSE(round, rct) (round)
 #endif
 
 #ifdef PBL_BW
 #define PBL_IF_COLOR_ELSE(color, bw) (bw)
+#define PBL_IF_BW_ELSE(bw, color) (bw)
 #else
 #define PBL_IF_COLOR_ELSE(color, bw) (color)
+#define PBL_IF_BW_ELSE(bw, color) (color)
 #endif
 
 #if defined REBBLE_PLATFORM_TINTIN
 #define PBL_PLATFORM_SWITCH(tintin, snowy, chalk, diorite, emery) (tintin)
+#define PBL_IF_MICROPHONE_ELSE(mic, nomic) (nomic)
+#define PBL_IF_SMARTSTRAP_ELSE(smart, nosmart) (nosmart)
+#define PBL_IF_HEALTH_ELSE(health, nohealth) (nohealth)
 #elif defined REBBLE_PLATFORM_SNOWY
 #define PBL_PLATFORM_SWITCH(tintin, snowy, chalk, diorite, emery) (snowy)
+#define PBL_IF_MICROPHONE_ELSE(mic, nomic) (mic)
+#define PBL_IF_SMARTSTRAP_ELSE(smart, nosmart) (smart)
+#define PBL_IF_HEALTH_ELSE(health, nohealth) (health)
 #elif defined REBBLE_PLATFORM_CHALK
 #define PBL_PLATFORM_SWITCH(tintin, snowy, chalk, diorite, emery) (chalk)
+#define PBL_IF_MICROPHONE_ELSE(mic, nomic) (mic)
+#define PBL_IF_SMARTSTRAP_ELSE(smart, nosmart) (smart)
+#define PBL_IF_HEALTH_ELSE(health, nohealth) (health)
 #else
 #error Add the new platform to PBL_PLATFORM_SWITCH in pebble_defines.h
 #endif
@@ -77,6 +90,7 @@
 // text redefines
 #define GTextOverflowMode n_GTextOverflowMode
 #define GTextOverflowModeTrailingEllipsis n_GTextOverflowModeTrailingEllipsis
+#define GTextOverflowModeFill n_GTextOverflowModeFill
 #define GFont n_GFont
 #define GTextAlignment n_GTextAlignment
 #define GTextAlignmentLeft n_GTextAlignmentLeft
@@ -173,5 +187,22 @@
 
 
 #define GCornerNone n_GCornerNone
+#define GCornerTopLeft n_GCornerTopLeft
+#define GCornerTopRight n_GCornerTopRight
+#define GCornerBottomLeft n_GCornerBottomLeft
+#define GCornerBottomRight n_GCornerBottomRight
+#define GCornersAll n_GCornersAll
+#define GCornersTop n_GCornersTop
+#define GCornersBottom n_GCornersBottom
+#define GCornersLeft n_GCornersLeft
+#define GCornersRight n_GCornersRight
 
+<<<<<<< HEAD
+<<<<<<< HEAD
 #include "gbitmap.h"
+=======
+#include "gbitmap.h"
+>>>>>>> 097db08... Add missing GCorner keywords
+=======
+#include "gbitmap.h"
+>>>>>>> 57bb1e3... Stage changes for the macro PR

@@ -31,7 +31,7 @@ endif
 
 # Do not override this here!  Override this in localconfig.mk.
 ifeq ($(shell uname -s),Darwin)
-PEBBLE_TOOLCHAIN_PATH ?= /usr/local/Cellar/pebble-toolchain/2.0/arm-cs-tools/bin
+PEBBLE_TOOLCHAIN_PATH ?= /usr/local/bin
 else
 PEBBLE_TOOLCHAIN_PATH ?= /usr/bin
 endif
@@ -41,7 +41,7 @@ PFX ?= $(PEBBLE_TOOLCHAIN_PATH)/arm-none-eabi-
 
 CC = $(PFX)gcc
 LD = $(PFX)ld
-GDB = $(PFX)gdb
+GDB ?= $(PFX)gdb
 OBJCOPY = $(PFX)objcopy
 
 # Do not override this here!  Override this in localconfig.mk.
@@ -56,7 +56,6 @@ VIRTUALENV = $(BUILD)/python_env
 VPYTHON3 = $(VIRTUALENV)/bin/python3
 
 all: $(PLATFORMS)
-
 #########################################
 # Turn platforms into testable platforms.
 #
@@ -109,20 +108,21 @@ endif
 $(1): $(BUILD)/$(1)/$(1).pbz
 
 $(1)_qemu: $(BUILD)/$(1)/fw.qemu_flash.bin $(BUILD)/$(1)/fw.qemu_spi.bin
-	$(QEMU) -rtc base=localtime -serial null -serial tcp::63771,server,nowait -serial stdio -gdb tcp::63770,server,nowait $(QEMUFLAGS_$(1)) -pflash $(BUILD)/$(1)/fw.qemu_flash.bin -$(QEMUSPITYPE_$(1)) $(BUILD)/$(1)/fw.qemu_spi.bin $(QEMUFLAGS)
+	$(QEMU) -rtc base=utc -serial null -serial tcp::63771,server,nowait -serial stdio -gdb tcp::63770,server,nowait $(QEMUFLAGS_$(1)) -pflash $(BUILD)/$(1)/fw.qemu_flash.bin -$(QEMUSPITYPE_$(1)) $(BUILD)/$(1)/fw.qemu_spi.bin $(QEMUFLAGS)
 
 ifneq ($(TESTABLE_$(1)),)
 # This is kind of cheesy.
 $(1)_runtest: $(BUILD)/$(1)_test/fw.qemu_flash.bin $(BUILD)/$(1)_test/fw.qemu_spi.bin $(VIRTUALENV)
 	$(VPYTHON3) Utilities/runtests.py \
 		--qemu="$(QEMU) -rtc base=localtime -serial null -serial tcp::63771,server,nowait -serial stdio -gdb tcp::63770,server,nowait $(QEMUFLAGS_$(1)) $(QEMUFLAGS) -pflash $(BUILD)/$(1)_test/fw.qemu_flash.bin -$(QEMUSPITYPE_$(1))" \
-		--platform=$(1)
+		--platform=$(1) \
+		$(TEST_ARGS)
 
 .PHONY: $(1)_runtest
 endif
 
 $(1)_gdb:
-	$(PFX)gdb -ex 'target remote localhost:63770' -ex "sym $(BUILD)/$(1)/tintin_fw.elf"
+	$(GDB) -ex 'target remote localhost:63770' -ex "sym $(BUILD)/$(1)/tintin_fw.elf"
 
 # List the resource header first to make sure it gets built first ...
 # otherwise we could get into trouble.
@@ -170,9 +170,9 @@ $(BUILD)/$(1)/$(1).pbz: $(BUILD)/$(1)/tintin_fw.bin $(BUILD)/$(1)/res/$$(PLATFOR
 
 # We have to update this first, because otherwise we don't know that we have
 # to build the qemu pbpack.
-$(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res.d: res/$$(PLATFORM_ALIAS_$(1)).json
+$(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res.d: res/$$(PLATFORM_ALIAS_$(1)).json $(VIRTUALENV)
 	@mkdir -p $$(dir $$@)
-	$(QUIET)Utilities/mkpack.py -r res -M $$< $(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res >/dev/null
+	$(QUIET)$(VPYTHON3) Utilities/mkpack.py -r res -M $$< $(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res >/dev/null
 
 
 $(BUILD)/$(1)/res/platform_res.h: $(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res.h
@@ -181,10 +181,10 @@ $(BUILD)/$(1)/res/platform_res.h: $(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res.
 
 $(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res.h: $(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res.pbpack
 
-$(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res.pbpack: res/$$(PLATFORM_ALIAS_$(1)).json
+$(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res.pbpack: res/$$(PLATFORM_ALIAS_$(1)).json $(VIRTUALENV)
 	$(call SAY,[$(1)] MKPACK $$<)
 	@mkdir -p $$(dir $$@)
-	$(QUIET)Utilities/mkpack.py -r res -M -H -P $$< $(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res
+	$(QUIET)$(VPYTHON3) Utilities/mkpack.py -r res -M -H -P $$< $(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res
 
 $(BUILD)/$(1)/fw.qemu_spi.bin: Resources/$$(PLATFORM_ALIAS_$(1))_spi.bin $(BUILD)/$(1)/res/$$(PLATFORM_ALIAS_$(1))_res.pbpack
 	$(call SAY,[$(1)] QEMU_SPI)
@@ -227,7 +227,10 @@ endif
 	$(call SAY,OBJCOPY $@)
 	$(QUIET)$(PFX)objcopy $< -O binary $@
 
+# Check to make sure user has the compiler installed, and if it's the correct version if so.
 $(BUILD)/version.c:
+	@if ! [ -f $(CC) ]; then echo "${RED}Error: It does not appear that you have the gcc-arm-none-eabi compiler installed in '$(PEBBLE_TOOLCHAIN_PATH)'.${STOP}"; exit 1; fi
+
 	$(call SAY,VERSION $@)
 	$(QUIET)mkdir -p $(dir $@)
 	$(QUIET)rm -f $@
@@ -240,11 +243,27 @@ $(BUILD)/version.c:
 
 .PHONY: $(BUILD)/version.c
 
+# And some other deps.  But we don't really have a stamp for those.  This
+# also makes a mess -- at some point, this should go into $(BUILD).
+lib/tz/zic lib/tz/tzdata.zi: lib/tz/zic.c lib/tz/private.h lib/tz/tzfile.h
+	make -C lib/tz zic tzdata.zi
+
+$(BUILD)/tz: lib/tz/zic lib/tz/tzdata.zi
+	$(call SAY,ZIC tzdata.zi)
+	@lib/tz/zic -b slim -r @$(shell date +%s) -d $(BUILD)/tz lib/tz/tzdata.zi
+
+$(BUILD)/tzdb: $(BUILD)/tz Utilities/tzcomp.py $(VIRTUALENV)
+	$(call SAY,TZCOMP $(BUILD)/tz)
+	@$(VIRTUALENV)/bin/python3 Utilities/tzcomp.py -i $< -o $@
+
+res/../%: %
+	@
+
 $(VIRTUALENV): Utilities/requirements.txt
 	$(call SAY,RM $@)
 	$(QUIET)rm -rf $@
 	$(call SAY,VIRTUALENV $@)
-	$(QUIET)$(PYTHON3) -m virtualenv $@
+	$(QUIET)$(PYTHON3) -m virtualenv -p $(PYTHON3) $@
 	$(call SAY,PIP INSTALL $@)
 	$(QUIET)$(VIRTUALENV)/bin/pip3 install -r $<
 

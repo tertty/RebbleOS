@@ -12,6 +12,15 @@
 #include "platform_config.h"
 #include "platform_res.h"
 #include "node_list.h"
+#include "protocol.h"
+#include "protocol_music.h"
+#include "event_service.h"
+#include "watchface.h"
+
+/* Configure Logging */
+#define MODULE_NAME "sysapp"
+#define MODULE_TYPE "SYS"
+#define LOG_LEVEL RBL_LOG_LEVEL_DEBUG //RBL_LOG_LEVEL_NONE
 
 extern void flash_dump(void);
 extern const char git_version[];
@@ -51,9 +60,21 @@ static MenuItems* app_item_selected(const MenuItem *item)
     return NULL;
 }
 
+static MenuItems* watchface_selected(const MenuItem *item)
+{
+    App * app = appmanager_get_app_by_name(item->text);
+    assert(app);
+
+    watchface_set_pref_by_uuid(&app->uuid);
+    watchface_enter();
+
+    return NULL;
+}
+
+void settings_enter();
 static MenuItems* settings_item_selected(const MenuItem *item)
 {
-    appmanager_app_start("Settings");
+    settings_enter();
     return NULL;
 }
 
@@ -75,6 +96,12 @@ static MenuItems* about_item_selected(const MenuItem *item)
     return NULL;
 }
 
+static MenuItems* music_item_selected(const MenuItem *item)
+{
+    appmanager_app_start("Music");
+    return NULL;
+}
+
 static MenuItems* watch_list_item_selected(const MenuItem *item) {
     MenuItems *items = menu_items_create(16);
     // loop through all apps
@@ -84,11 +111,11 @@ static MenuItems* watch_list_item_selected(const MenuItem *item) {
     {
         if ((!strcmp(app->name, "System")) ||
             (!strcmp(app->name, "watchface")) ||
-            app->type != APP_TYPE_FACE)
+            app->type != AppTypeWatchface)
         {
             continue;
         }
-        menu_items_add(items, MenuItem(app->name, NULL, RESOURCE_ID_CLOCK, app_item_selected));
+        menu_items_add(items, MenuItem(app->name, NULL, RESOURCE_ID_CLOCK, watchface_selected));
     }
     return items;
 }
@@ -102,7 +129,7 @@ static MenuItems* app_list_item_selected(const MenuItem *item) {
     {
         if ((!strcmp(app->name, "System")) ||
             (!strcmp(app->name, "watchface")) ||
-            app->type == APP_TYPE_FACE)
+            app->type == AppTypeWatchface)
         {
             continue;
         }
@@ -114,7 +141,25 @@ static MenuItems* app_list_item_selected(const MenuItem *item) {
 static void exit_to_watchface(struct Menu *menu, void *context)
 {
     // Exit to watchface
-    appmanager_app_start("Simple");
+    watchface_enter();
+}
+
+static MusicTrackInfo *_music_track;
+static MenuItems *items;
+
+static void _music_info(EventServiceCommand command, void *data)
+{
+    if (_music_track)
+        app_free(_music_track);
+
+    MusicTrackInfo *amusic = protocol_music_decode(data);
+    _music_track = amusic;
+
+    LOG_INFO("Title: %s", amusic->title);
+    LOG_INFO("Artist: %s", amusic->artist);
+    LOG_INFO("Album: %s", amusic->album);
+            
+    items->items[2].sub_text = (char *)amusic->title;
 }
 
 static void systemapp_window_load(Window *window)
@@ -130,15 +175,17 @@ static void systemapp_window_load(Window *window)
         .on_menu_exit = exit_to_watchface
     });
     layer_add_child(window_layer, menu_get_layer(s_menu));
+    window_set_background_color(s_main_window, GColorWhite);
 
     menu_set_click_config_onto_window(s_menu, window);
 
-    MenuItems *items = menu_items_create(6);
+    MenuItems *items = menu_items_create(7);
     menu_items_add(items, MenuItem("Watchfaces", "All your faces", RESOURCE_ID_CLOCK, watch_list_item_selected));
     menu_items_add(items, MenuItem("Apps", "Get appy", RESOURCE_ID_CLOCK, app_list_item_selected));
+    menu_items_add(items, MenuItem("Music", "No Music",  RESOURCE_ID_RADIO, music_item_selected));// TODO: plumb now-playing data into this menu item
     menu_items_add(items, MenuItem("Settings", "Config", RESOURCE_ID_SPANNER, settings_item_selected));
     menu_items_add(items, MenuItem("Tests", NULL, RESOURCE_ID_CLOCK, run_test_item_selected));
-    menu_items_add(items, MenuItem("Notifications", NULL, RESOURCE_ID_SPEECH_BUBBLE, notification_item_selected));
+    menu_items_add(items, MenuItem("Notifications", NULL, RESOURCE_ID_NOTIFICATION, notification_item_selected));
     menu_items_add(items, MenuItem("About", "It's-a me!", RESOURCE_ID_SPEECH_BUBBLE, about_item_selected));
     menu_set_items(s_menu, items);
 
@@ -149,6 +196,10 @@ static void systemapp_window_load(Window *window)
 #endif
 
     //tick_timer_service_subscribe(MINUTE_UNIT, prv_tick_handler);
+    
+    /* Music. Request the music track from the remote device */
+    protocol_music_get_current_track();
+    event_service_subscribe(EventServiceCommandMusic, _music_info);
 }
 
 static void systemapp_window_unload(Window *window)
@@ -165,6 +216,8 @@ static void about_window_load(Window *window)
 {
     Layer *window_layer = window_get_root_layer(s_about_window);
     GRect bounds = layer_get_bounds(window_layer);
+    
+    window_set_background_color(window, GColorWhite);
 
     status_bar = status_bar_layer_create();
     status_bar_layer_set_separator_mode(status_bar, StatusBarLayerSeparatorModeDotted);
@@ -247,6 +300,7 @@ static void about_window_unload(Window *window)
     gbitmap_destroy(rocket_bitmap);
 }
 
+extern void settings_init();
 void systemapp_init(void)
 {
     s_main_window = window_create();
@@ -264,12 +318,16 @@ void systemapp_init(void)
     });
 
     window_stack_push(s_main_window, true);
+    settings_init();
+    watchface_init();
 }
 
+extern void settings_deinit();
 void systemapp_deinit(void)
 {
     window_destroy(s_main_window);
     window_destroy(s_about_window);
+    settings_deinit();
 }
 
 void systemapp_main(void)

@@ -3,20 +3,18 @@
 #include "log.h"
 #include "protocol.h"
 #include "test.h"
+#include "protocol_service.h"
+#include "rebble_memory.h"
 
-static void other_handler(const pbl_transport_packet *packet)
+void other_handler(const RebblePacket incoming_packet)
 {
-    KERN_LOG("QEMU", APP_LOG_LEVEL_INFO, "I got these %d bytes from qemu:", packet->length);
-    debug_write((const unsigned char *)"\n", 1);
+//     KERN_LOG("QEMU", APP_LOG_LEVEL_INFO, "I got these %d bytes from qemu:", packet_get_data_length(incoming_packet));
+//     debug_write((const unsigned char *)"\n", 1);
 }
 
-static void spp_handler(pbl_transport_packet *packet)
+void spp_handler(const RebblePacket incoming_packet)
 {
-    if (!protocol_parse_packet(packet, qemu_send_data))
-        return; // we are done, no point looking as we have no data left
-
-    // seems legit
-    protocol_process_packet(packet);
+    packet_recv(incoming_packet);
 }
 
 const PebbleEndpoint qemu_endpoints[] =
@@ -29,6 +27,10 @@ const PebbleEndpoint qemu_endpoints[] =
     {
         .endpoint = QemuProtocol_Tests,
         .handler = test_packet_handler
+    },
+    {
+        .endpoint = QemuProtocol_TestsLoopback,
+        .handler = test_packet_loopback_handler
     },
 #endif
     {

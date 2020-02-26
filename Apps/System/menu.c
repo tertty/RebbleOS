@@ -118,7 +118,7 @@ Menu* menu_create(GRect frame)
     Menu *menu = (Menu *) app_calloc(1, sizeof(Menu));
     menu->items = menu_items_create(0);
     menu->layer = menu_layer_create(frame);
-    menu_layer_set_highlight_colors(menu->layer, GColorRed, GColorWhite);
+    menu_layer_set_highlight_colors(menu->layer, PBL_IF_COLOR_ELSE(GColorRed, GColorBlack), GColorWhite);
     menu_layer_set_callbacks(menu->layer, menu, (MenuLayerCallbacks) {
         .get_num_rows = (MenuLayerGetNumberOfRowsInSectionsCallback) get_num_rows_callback,
         .draw_row = (MenuLayerDrawRowCallback) draw_row_callback,
@@ -171,7 +171,7 @@ static void back_single_click_handler(ClickRecognizerRef _, Menu *menu)
         MenuItems *prev = menu->items;
         menu->items = prev->back;
         menu_layer_reload_data(menu->layer);
-        menu_layer_set_selected_index(menu->layer, prev->back_index, MenuRowAlignTop, false);
+        menu_layer_set_selected_index(menu->layer, prev->back_index, MenuRowAlignCenter, false);
         prev->back = NULL; // so we don't free that
         menu_items_destroy(prev);
     }

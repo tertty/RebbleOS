@@ -28,13 +28,23 @@
 #define FLASH_CMD_RESUME             0x0030
 #define FLASH_CMD_UNLOCK_BYPASS      0x0020
 #define FLASH_CMD_CFI_QUERY          0x0098
+#define FLASH_CMD_STATUS_READ        0x0070
+
+#define FLASH_STATUS_READY       0x80
+#define FLASH_STATUS_PROG_ERROR  0x20
+#define FLASH_STATUS_ERASE_ERROR 0x10
+
 
 #define SECTOR_START(address) (address & 0xFFFF0000)
 #define SECTOR_ADDRESS(sector) ((((sector) << 17) & 0xFFFF0000))
 #define ALIGN(a) (a & 0xFFFFFFFE)
 #define ADDR_SHIFT(Address)   (Bank1_NOR_ADDR + (2 * (Address)))
-#define SHF(Address)   (Address << 1)
-#define NOR_WRITE(Address, Data)   (*(__IO uint16_t *)(Address) = (Data))
+#define SHF(Address)   ((Address) << 1)
+#if 0
+#define NOR_WRITE(Address, Data)   do { printf("NOR + %08x <- %08x\n", (Address) - Bank1_NOR_ADDR, (Data)); *(__IO uint16_t *)(Address) = (Data); } while(0)
+#else
+#define NOR_WRITE(Address, Data)   do { *(__IO uint16_t *)(Address) = (Data); } while(0)
+#endif
 #define NOR_WRITE8(Address, Data)   (*(__IO uint8_t *)(Address) = (Data))
 
 void _nor_gpio_config(void);
@@ -46,7 +56,7 @@ void _nor_clock_release(void);
 int _flash_test(void);
 
 static void _nor_write16(uint32_t address, uint16_t data);
-static _nor_flash_command(uint16_t command);
+static void _nor_flash_command(uint16_t command);
 
 /*
  * Initialise the flash hardware. 
@@ -302,7 +312,7 @@ void _nor_enter_write_mode(uint32_t address)
 //   _nor_reset_region(address);
 }
 
-static _nor_flash_command(uint16_t command)
+static void _nor_flash_command(uint16_t command)
 {
     _nor_clock_request();
     *(__IO uint16_t *)(Bank1_NOR_ADDR + SHF(0xAAA)) = command;
@@ -340,39 +350,49 @@ void hw_flash_read_bytes(uint32_t address, uint8_t *buffer, size_t length)
     flash_operation_complete(0);
 }
 
+/* returns 0 if success, nonzero if error */
+static int _flash_poll_complete(uint32_t address)
+{
+    uint16_t sr;
+    
+    do {
+        NOR_WRITE(Bank1_NOR_ADDR + SECTOR_START(address) + SHF(0x555), FLASH_CMD_STATUS_READ);
+        sr = *(__IO uint16_t *)(Bank1_NOR_ADDR + SECTOR_START(address));
+    } while (!(sr & FLASH_STATUS_READY));
+    
+    return sr & (FLASH_STATUS_PROG_ERROR | FLASH_STATUS_ERASE_ERROR);
+}
+
 int hw_flash_write_sync(uint32_t address, uint8_t *buffer, size_t length)
 {
     _nor_clock_request();
-    uint8_t rv = 0;
-    uint8_t alength = length % 2;
-    printf("write id %d %x\n", length,  SHF(address));
-    uint16_t exis = *(__IO uint8_t *)(Bank1_NOR_ADDR + SHF(address + length/2));
-        
-    NOR_WRITE(Bank1_NOR_ADDR + address, FLASH_CMD_WRITE_BUFFER_LOAD);
-    NOR_WRITE(Bank1_NOR_ADDR + address +  SHF(0x2AA), (length / 2) - 1 + alength);
+    int start_align = address % 2;
+    int end_align = (address + length) % 2;
+    uint32_t addr_aligned = address & ~1;
+    uint32_t len_padded = length + start_align + end_align;
+    assert((len_padded & 1) == 0);
+    assert((address & ~63) == ((address + length - 1) & ~63));
     
-    for(size_t i = 0; i < length; i+=2)
+    NOR_WRITE(Bank1_NOR_ADDR + SECTOR_START(addr_aligned) + SHF(0x555), FLASH_CMD_WRITE_BUFFER_LOAD);
+    NOR_WRITE(Bank1_NOR_ADDR + SECTOR_START(addr_aligned) + SHF(0x2AA), len_padded / 2 - 1);
+
+    for(size_t i = 0; i < len_padded; i+=2)
     {
-        // if its an odd byte read the existing byte and merge the result back in
-        if (alength && i + 2 > length)
-        {
-            uint16_t v = (buffer[i]) | (exis << 8);
-            NOR_WRITE(Bank1_NOR_ADDR + SHF((address/2) + length/2),  v);
-            break;
-        }
-        NOR_WRITE(Bank1_NOR_ADDR + SHF((address/2) + i/2),  *((uint16_t *)buffer + i/2));
-    }
+        uint8_t v[2];
+        v[0] = ((i == 0)                && start_align) ? 0xFF : *(buffer++);
+        v[1] = ((i == (len_padded - 2)) && end_align  ) ? 0xFF : *(buffer++);
+        NOR_WRITE(Bank1_NOR_ADDR + addr_aligned + i, *((uint16_t *)v));
+    }       
     
+    NOR_WRITE(Bank1_NOR_ADDR + SECTOR_START(addr_aligned) + SHF(0x555), FLASH_CMD_WRITE_CONFIRM);
     
-    NOR_WRITE(Bank1_NOR_ADDR + SECTOR_START(address) +SHF(0x555), FLASH_CMD_WRITE_CONFIRM);
-    /*if (*( (__IO uint16_t *) (Bank1_NOR_ADDR + ALIGN(address))) != buffer)
-    {
-        ex = -1;
-    }*/
+    int err = _flash_poll_complete(addr_aligned);
+
     _nor_reset_state();
+    
     _nor_clock_release();
     //flash_operation_complete(ex);
-    return rv;
+    return err;
 }
 
 int hw_flash_erase_32k_sync(uint32_t address)
@@ -383,10 +403,12 @@ int hw_flash_erase_32k_sync(uint32_t address)
     NOR_WRITE(Bank1_NOR_ADDR + (address) + SHF(0x555), FLASH_CMD_ERASE_SETUP);
     NOR_WRITE(Bank1_NOR_ADDR + (address) + SHF(0x2AA), FLASH_CMD_SECTOR_ERASE);
         
+    int err = _flash_poll_complete(address);
+
     _nor_reset_state();
 
     _nor_clock_release();
-    return 0;
+    return err;
 }
 
 int hw_flash_erase_sync(uint32_t addr, uint32_t len) {
