@@ -47,6 +47,7 @@
 #include "rebbleos.h"
 #include "music.h"
 #include "property_animation.h"
+#include "platform_res.h"
 
 #define LERP(a, b)  ((a) + ((b) - (a)) * distance_normalized / ANIMATION_NORMALIZED_MAX)
 #define RECORD_CENTER_X 56
@@ -279,6 +280,7 @@ static const AnimationImplementation implementation_arm = {
 static void _setup_music_animation_arm(int32_t angle, uint32_t duration_ms) {
     // TODO Instead of taking a fixed duration set a duration based on the distance
     s_animation_end_arm_angle = angle;
+    duration_ms = 500;
     animation_set_duration(_s_animation_arm_ptr, duration_ms);
     animation_schedule(_s_animation_arm_ptr);
 }
@@ -307,9 +309,9 @@ static void _skip_track(int32_t direction) {
 
 static void _pop_notification_click_handler(ClickRecognizerRef recognizer, void *context)
 {
-    _music_deinit();
-    window_stack_pop(true);
-    appmanager_app_start("System");
+     _music_deinit();
+     window_stack_pop(true);
+     appmanager_app_start("System");
 }
 
 static void _up_click_handler(ClickRecognizerRef recognizer, void *context) {
@@ -329,9 +331,11 @@ static void _select_click_handler(ClickRecognizerRef recognizer, void *context) 
     if (s_is_paused) {
         tick_timer_service_subscribe(MINUTE_UNIT, _music_tick);
         _setup_music_animation_arm(ARM_HOME_ANGLE, ARM_SKIP_SPEED);
+        s_select_bitmap = gbitmap_create_with_resource(RESOURCE_ID_MUSIC_PAUSE);
     } else {
         tick_timer_service_subscribe(SECOND_UNIT, _music_tick);
         _setup_music_animation_arm(ARM_START_ANGLE + s_progress * (ARM_END_ANGLE - ARM_START_ANGLE) / s_length, ARM_SKIP_SPEED);
+        s_select_bitmap = gbitmap_create_with_resource(RESOURCE_ID_MUSIC_PAUSE);
     }
 }
 
@@ -504,12 +508,12 @@ static void _music_window_load(Window *window) {
     //animation_set_curve(_s_animation_arm_ptr, AnimationCurveEaseInOut);
     
     s_music_action_bar = action_bar_layer_create();
-    s_up_bitmap = gbitmap_create_with_resource(21); //XXX
-    s_down_bitmap = gbitmap_create_with_resource(25); //XXX
-    s_select_bitmap = gbitmap_create_with_resource(22); //XXX
+    s_up_bitmap = gbitmap_create_with_resource(RESOURCE_ID_CLOCK); //XXX
+    s_down_bitmap = gbitmap_create_with_resource(RESOURCE_ID_CLOCK); //XXX
+    s_select_bitmap = gbitmap_create_with_resource(RESOURCE_ID_MUSIC_PAUSE); //XXX
     action_bar_layer_set_icon(s_music_action_bar, BUTTON_ID_UP, s_up_bitmap);
-    action_bar_layer_set_icon(s_music_action_bar, BUTTON_ID_SELECT, s_down_bitmap);
-    action_bar_layer_set_icon(s_music_action_bar, BUTTON_ID_DOWN, s_select_bitmap);
+    action_bar_layer_set_icon(s_music_action_bar, BUTTON_ID_SELECT, s_select_bitmap);
+    action_bar_layer_set_icon(s_music_action_bar, BUTTON_ID_DOWN, s_down_bitmap);
     action_bar_layer_set_click_config_provider(s_music_action_bar, _click_config_provider);
     action_bar_layer_add_to_window(s_music_action_bar, s_music_main_window);
     action_bar_layer_set_background_color(s_music_action_bar, GColorLightGray);

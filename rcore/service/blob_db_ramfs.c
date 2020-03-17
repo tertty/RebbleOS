@@ -169,39 +169,43 @@ void ramfs_delete(Uuid *uuid)
 //     }
 }
 
-TEST(ramfs_two_files) {
-    struct fd fd1, fd2;
-    struct file file1, file2;
-    int rv = TEST_PASS;
-    
-    *artifact = 0;
-    
-    ramfs_open(&fd1, &file1, 3);
-    ramfs_write(&fd1, "Hello", 5);
-    
-    ramfs_open(&fd2, &file2, 4);
-    ramfs_write(&fd2, "World", 5);
-    
-    char buf[5];
-    ramfs_open(&fd1, &file1, 4);
-    if (ramfs_read(&fd1, buf, 5) < 5) {
-        rv = TEST_FAIL;
-        LOG_ERROR("short read db4");
+#ifdef REBBLEOS_TESTING
+
+    TEST(ramfs_two_files) {
+        struct fd fd1, fd2;
+        struct file file1, file2;
+        int rv = TEST_PASS;
+        
+        *artifact = 0;
+        
+        ramfs_open(&fd1, &file1, 3);
+        ramfs_write(&fd1, "Hello", 5);
+        
+        ramfs_open(&fd2, &file2, 4);
+        ramfs_write(&fd2, "World", 5);
+        
+        char buf[5];
+        ramfs_open(&fd1, &file1, 4);
+        if (ramfs_read(&fd1, buf, 5) < 5) {
+            rv = TEST_FAIL;
+            LOG_ERROR("short read db4");
+        }
+        
+        if (memcmp(buf, "World", 5)) {
+            rv = TEST_FAIL;
+            *artifact = 1;
+            LOG_ERROR("Artifact1 was %c", buf[0]);
+        }
+        
+        ramfs_open(&fd1, &file1, 3);
+        ramfs_read(&fd1, buf, 5);
+        if (memcmp(buf, "Hello", 5)) {
+            rv = TEST_FAIL;
+            *artifact = 2;
+            LOG_ERROR("Artifact2 was %c", buf[0]);
+        }
+        
+        return rv;
     }
-    
-    if (memcmp(buf, "World", 5)) {
-        rv = TEST_FAIL;
-        *artifact = 1;
-        LOG_ERROR("Artifact1 was %c", buf[0]);
-    }
-    
-    ramfs_open(&fd1, &file1, 3);
-    ramfs_read(&fd1, buf, 5);
-    if (memcmp(buf, "Hello", 5)) {
-        rv = TEST_FAIL;
-        *artifact = 2;
-        LOG_ERROR("Artifact2 was %c", buf[0]);
-    }
-    
-    return rv;
-}
+
+#endif
