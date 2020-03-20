@@ -107,6 +107,8 @@ SRCS_all += rcore/rebble_memory.c
 SRCS_all += rcore/vibrate.c
 SRCS_all += rcore/flash.c
 SRCS_all += rcore/fs.c
+SRCS_all += rcore/fs_crc.c
+SRCS_all += rcore/fs_test.c
 SRCS_all += rcore/log.c
 SRCS_all += rcore/resource.c
 SRCS_all += rcore/watchdog.c
@@ -122,6 +124,7 @@ SRCS_all += rcore/protocol/protocol_app.c
 SRCS_all += rcore/protocol/protocol_blob.c
 
 SRCS_all += rcore/service/blob_db.c
+SRCS_all += rcore/service/blob_db_test.c
 SRCS_all += rcore/service/blob_db_ramfs.c
 SRCS_all += rcore/service/timeline.c
 
