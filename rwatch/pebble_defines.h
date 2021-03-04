@@ -197,12 +197,4 @@
 #define GCornersLeft n_GCornersLeft
 #define GCornersRight n_GCornersRight
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 #include "gbitmap.h"
-=======
-#include "gbitmap.h"
->>>>>>> 097db08... Add missing GCorner keywords
-=======
-#include "gbitmap.h"
->>>>>>> 57bb1e3... Stage changes for the macro PR
